@@ -15,6 +15,7 @@ import com.nimesa.assignment.model.EC2Instances;
 import com.nimesa.assignment.model.S3Buckets;
 import com.nimesa.assignment.service.AWSCredentialsInitializer;
 import com.nimesa.assignment.service.AsyncService;
+import com.nimesa.assignment.service.EC2InstanceService;
 import com.nimesa.assignment.service.S3BucketService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -41,16 +42,19 @@ public class DiscoveryController {
 
     private final S3BucketService s3BucketService;
 
+    private final EC2InstanceService ec2InstanceService;
+
     @Autowired
     private MongoTemplate mongoTemplate;
 
     @Autowired
-    public DiscoveryController(AWSCredentialsInitializer awsCredentialsInitializer, S3BucketService s3BucketService ) {
+    public DiscoveryController(AWSCredentialsInitializer awsCredentialsInitializer, S3BucketService s3BucketService, EC2InstanceService ec2InstanceService ) {
         this.awsCredentialsInitializer = awsCredentialsInitializer;
         this.s3BucketService = s3BucketService;
+        this.ec2InstanceService = ec2InstanceService;
     }
 
-    // This API asynchronously discover EC2 instances in the Mumbai Region in one thread and S3 buckets in another thread and persist the result in DB
+
     @GetMapping("/discover/services")
     public String discoverServices() {
 
@@ -58,12 +62,12 @@ public class DiscoveryController {
         Regions awsRegion = awsCredentialsData.getAwsRegion();
         AWSStaticCredentialsProvider credentialsProvider = awsCredentialsData.getCredentialsProvider();
 
-        AsyncService.submit(() -> describeEC2Instances(credentialsProvider, awsRegion));
-        AsyncService.submit(() -> describeS3Instances(credentialsProvider, awsRegion));
+        AsyncService.submit(() -> ec2InstanceService.describeEC2Instances(credentialsProvider, awsRegion));
+        AsyncService.submit(() -> s3BucketService.describeS3Instances(credentialsProvider, awsRegion));
 
 
-        CompletableFuture<Void> ec2Future = describeEC2Instances(credentialsProvider, awsRegion);
-        CompletableFuture<Void> s3Future = describeS3Instances(credentialsProvider, awsRegion);
+        CompletableFuture<Void> ec2Future = ec2InstanceService.describeEC2Instances(credentialsProvider, awsRegion);
+        CompletableFuture<Void> s3Future = s3BucketService.describeS3Instances(credentialsProvider, awsRegion);
 
         System.out.println("EC2 Future" + ec2Future);
         System.out.println("S3 Future" + s3Future);
@@ -196,73 +200,5 @@ public class DiscoveryController {
         }
 
         return objectKeys;
-    }
-
-    @Async
-    public CompletableFuture<Void> describeEC2Instances(AWSStaticCredentialsProvider credentialsProvider, Regions awsRegion){
-        try{
-            // Create EC2 Async client
-            System.out.println("Thread ec2" + Thread.currentThread());
-            AmazonEC2Async ec2AsyncClient = AmazonEC2AsyncClientBuilder.standard()
-                    .withCredentials(credentialsProvider)
-                    .withRegion(awsRegion)
-                    .build();
-            boolean done = false;
-
-            DescribeInstancesRequest request = new DescribeInstancesRequest();
-            while(!done) {
-                DescribeInstancesResult response = ec2AsyncClient.describeInstances(request);
-
-                for(Reservation reservation : response.getReservations()) {
-                    for(Instance instance : reservation.getInstances()) {
-                        EC2Instances ec2Instance = new EC2Instances(
-                                instance.getInstanceId(),
-                                instance.getImageId(),
-                                instance.getInstanceType(),
-                                instance.getState().getName(),
-                                instance.getMonitoring().getState()
-                        );
-
-                        mongoTemplate.save(ec2Instance);
-                    }
-                }
-
-                request.setNextToken(response.getNextToken());
-
-                if(response.getNextToken() == null) {
-                    done = true;
-                }
-            }
-
-            ec2AsyncClient.shutdown();
-            return CompletableFuture.completedFuture(null);
-        } catch (Exception e){
-            return CompletableFuture.failedFuture(e);
-        }
-    }
-    @Async
-    public CompletableFuture<Void> describeS3Instances(AWSStaticCredentialsProvider credentialsProvider, Regions awsRegion){
-        //Create S3 Async client
-        try {
-            System.out.println("Thread s3" + Thread.currentThread());
-            AmazonS3 s3Client = AmazonS3ClientBuilder.standard()
-                    .withCredentials(credentialsProvider)
-                    .withRegion(awsRegion)
-                    .build();
-
-            List<Bucket> buckets = s3Client.listBuckets();
-            for (Bucket b : buckets) {
-
-                S3Buckets s3BucketObject = new S3Buckets(
-                        b.getName(),
-                        b.getCreationDate()
-                );
-
-                mongoTemplate.save(s3BucketObject);
-            }
-            return CompletableFuture.completedFuture(null);
-        } catch (Exception e) {
-            return CompletableFuture.failedFuture(e);
-        }
     }
 }
